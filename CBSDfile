@@ -1,0 +1,208 @@
+# Default Postgresql version
+PG_VER="13"
+DB_DATABASE=nextcloud
+DB_USERNAME=nextcloud
+DOMAIN=mycloud.example.com
+
+NCUSER="admin"
+NCPASS="password"
+
+quiet=0
+
+jail_nextcloud()
+{
+	ipv4_addr="DHCP"
+	#ip4_addr=$( dhcpd ip4pool=10.100.0.10-200 )
+	allow_sysvipc=1
+	allow_raw_sockets=1
+	host_hostname="${jname}.my.domain"
+	ver="native"
+	pkg_bootstrap="1"
+	nice="0"
+	pkglist="security/ca_root_nss shells/bash security/sudo \
+	         databases/postgresql${PG_VER}-contrib \
+	         databases/postgresql${PG_VER}-server \
+	         databases/memcached \
+	         www/nginx \
+	         lang/php74 \
+	         php74-pecl-APCu \
+	         graphics/pecl-imagick \
+	         devel/php74-intl \
+	         net/php74-ldap \
+	         devel/php74-pcntl \
+	         archivers/php74-bz2 \
+	         math/php74-bcmath \
+	         math/php74-gmp \
+	         sysutils/php74-fileinfo \
+	         textproc/php74-ctype \
+	         ftp/php74-curl \
+	         textproc/php74-dom \
+	         security/php74-filter \
+	         graphics/php74-gd \
+	         graphics/php74-exif \
+	         converters/php74-iconv \
+	         devel/php74-json \
+	         converters/php74-mbstring \
+	         databases/php74-mysqli \
+	         www/php74-opcache \
+	         security/php74-openssl \
+	         databases/php74-pdo \
+	         databases/php74-pdo_mysql \
+	         databases/php74-pdo_pgsql \
+	         databases/php74-pdo_sqlite \
+	         databases/php74-pgsql \
+	         archivers/php74-phar \
+	         sysutils/php74-posix \
+	         www/php74-session \
+	         textproc/php74-simplexml \
+	         databases/php74-sqlite3 \
+	         devel/php74-tokenizer \
+	         textproc/php74-xml \
+	         textproc/php74-xmlreader \
+	         textproc/php74-xmlwriter \
+	         textproc/php74-xsl \
+	         archivers/php74-zip \
+	         archivers/php74-zlib"
+	         
+}
+
+postcreate_nextcloud()
+{
+	local _ip
+
+	set +o xtrace
+	set +o errexit
+	# turn off unnecessary services
+	sysrc \
+		syslogd_flags="-ss -c" \
+		sendmail_enable="NO" \
+		sendmail_submit_enable="NO" \
+		sendmail_outbound_enable="NO" \
+		sendmail_msp_queue_enable="NO" \
+		nginx_enable="YES" \
+		memcached_enable="YES" \
+		postgresql_enable="YES" \
+		php_fpm_enable="YES"
+
+	# use CBSD internal function to generate random password, length=30
+	DB_PASSWORD=$( random_password_gen -l 30 )
+
+	# cbsd jexec
+	jexec <<EOF
+echo "127.0.0.1:5432:${DB_DATABASE}:${DB_USERNAME}:${DB_PASSWORD}" > /root/.pgpass
+echo "::1:5432:${DB_DATABASE}:${DB_USERNAME}:${DB_PASSWORD}" >> /root/.pgpass
+chmod 0600 /root/.pgpass
+EOF
+	echo
+	${ECHO} "${H3_COLOR}Postgres git user password saved in: ${N2_COLOR}${data}/root/.pgpass${N0_COLOR}"
+	echo
+	set -o xtrace
+
+	# Postgresql setup
+	service mode=action postgresql initdb
+
+	# Allow full access to DB
+	jexec <<EOF
+echo "host    all             all             0.0.0.0/0               trust" >> /var/db/postgres/data${PG_VER}/pg_hba.conf
+echo "host    all             all             ::/0                    trust" >> /var/db/postgres/data${PG_VER}/pg_hba.conf
+EOF
+
+	# Start postgres
+	service mode=action jname=${jname} postgresql start
+	sleep 2
+
+	# tests:
+	set +o xtrace
+	set -o errexit
+	tests/10_postgres_port.sh
+	set +o errexit
+	set -o xtrace
+
+	jexec <<EOF
+# create user git
+psql -d template1 -U postgres -c "CREATE USER ${DB_USERNAME} CREATEDB SUPERUSER;"
+
+# Create the GitLab production database & grant all privileges on database
+psql -d template1 -U postgres -c "CREATE DATABASE ${DB_DATABASE} OWNER ${DB_USERNAME};"
+
+## Try connecting to the new database with the new user
+psql -U ${DB_USERNAME} -d ${DB_DATABASE}
+
+EOF
+
+	# tests
+	set +o xtrace
+	set -o errexit
+	tests/20_postgres_cred.sh
+	set +o errexit
+	set -o xtrace
+
+	# execute cmd inside jail
+	jexec <<EOF
+
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:/root/bin
+set -o errexit
+
+	cat >> /etc/make.conf << __EOF
+DEFAULT_VERSIONS+= php=7.4
+DEFAULT_VERSIONS+= pgsql=13
+OPTIONS_UNSET+=    MYSQL
+OPTIONS_SET+=      PGSQL
+OPTIONS_SET+=EXIF
+OPTIONS_SET+=IMAGICK
+OPTIONS_SET+=INTL
+OPTIONS_SET+=PCNTL
+__EOF
+
+	echo "Installing nextcloud..."
+        make -C /usr/ports/www/nextcloud BATCH=yes install clean
+	mkdir -p /usr/local/etc/nginx/ssl
+	mkdir -p /var/db/nextcloud/data
+	chown -R www:www /var/db/nextcloud
+	#chown -R www:www /usr/local/www/nextcloud
+	echo "create sessions tmp dir outside nextcloud installation"
+	mkdir -p /tmp/nextcloud-sessions-tmp
+	chmod o-rwx /tmp/nextcloud-sessions-tmp
+	chown -R www:www /tmp/nextcloud-sessions-tmp
+EOF
+
+	jscp files/gen-cer ${jname}:/usr/local/etc/nginx/ssl/
+	jscp files/php-fpm.conf ${jname}:/usr/local/etc/
+	jscp files/php-fpm.d/www.conf ${jname}:/usr/local/etc/php-fpm.d/
+	
+	jexec <<EOF
+	cp /usr/local/etc/php.ini-production /usr/local/etc/php.ini
+	echo "Modify opcache settings in php.ini according to Nextcloud documentation (remove comment and set recommended value)"
+	echo "https://docs.nextcloud.com/server/15/admin_manual/configuration_server/server_tuning.html#enable-php-opcache"
+	sed -i '' 's/.*opcache.enable=.*/opcache.enable=1/' /usr/local/etc/php.ini
+	sed -i '' 's/.*opcache.enable_cli=.*/opcache.enable_cli=1/' /usr/local/etc/php.ini
+	sed -i '' 's/.*opcache.interned_strings_buffer=.*/opcache.interned_strings_buffer=8/' /usr/local/etc/php.ini
+	sed -i '' 's/.*opcache.max_accelerated_files=.*/opcache.max_accelerated_files=10000/' /usr/local/etc/php.ini
+	sed -i '' 's/.*opcache.memory_consumption=.*/opcache.memory_consumption=128/' /usr/local/etc/php.ini
+	sed -i '' 's/.*opcache.save_comments=.*/opcache.save_comments=1/' /usr/local/etc/php.ini
+	sed -i '' 's/.*opcache.revalidate_freq=.*/opcache.revalidate_freq=1/' /usr/local/etc/php.ini
+
+	# recommended value of 512MB for php memory limit (avoid warning when running occ)
+	sed -i '' 's/.*memory_limit.*/memory_limit=512M/' /usr/local/etc/php.ini
+	echo "apc.enable_cli=1" >> /usr/local/etc/php.ini
+	sed -i '' -e 's/cloud.example.com/${DOMAIN}/g' /usr/local/etc/nginx/nginx.conf
+	php /usr/local/www/nextcloud/occ maintenance:install --database 'pgsql' --database-name '${DB_DATABASE}' --database-user '${DB_USERNAME}' --database-pass '${DB_PASSWORD}' --admin-user '${NCUSER}' --admin-pass '${NCPASS}' --data-dir='/var/db/nextcloud/data'
+	php /usr/local/www/nextcloud/occ config:system:set trusted_domains 1 --value=${DOMAIN}
+	chown www:www /usr/local/www/nextcloud/config/config.php
+	cd /usr/local/etc/nginx/ssl
+	chmod +x gen-cer
+	./gen-cer ${DOMAIN}
+EOF
+
+	expose mode=add in=8081 out=443
+	service mode=action php-fpm start || true
+	service mode=action memcached start || true
+	service mode=action nginx start || true
+
+	# tests
+	set +o xtrace
+	set -o errexit
+	tests/50_nginx_process.sh
+	set +o errexit
+	set -o xtrace
+}
