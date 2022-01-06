@@ -1,0 +1,9 @@
+{
+    "system": {
+        "memcache.distributed": "\\OC\\Memcache\\Memcached",
+        "memcached_servers": [
+            ["localhost",11211]
+        ]
+    }
+}
+

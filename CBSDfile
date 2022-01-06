@@ -1,11 +1,21 @@
+# Default PHP version
+#PHP_VER=74
+PHP_VER=80
+
 # Default Postgresql version
 PG_VER="13"
 DB_DATABASE=nextcloud
 DB_USERNAME=nextcloud
+# use CBSD internal function to generate random password, length=30
+DB_PASSWORD=$( random_password_gen -l 30 )
+
 DOMAIN=mycloud.example.com
 
 NCUSER="admin"
 NCPASS="password"
+NCDATAFOLDER="/var/db/nextcloud/data"
+
+WWW_EXPOSE_PORT=8080
 
 quiet=0
 
@@ -24,45 +34,45 @@ jail_nextcloud()
 	         databases/postgresql${PG_VER}-server \
 	         databases/memcached \
 	         www/nginx \
-	         lang/php74 \
-	         php74-pecl-APCu \
+	         lang/php${PHP_VER} \
+	         php${PHP_VER}-pecl-APCu \
+	         php${PHP_VER}-pecl-memcached \
 	         graphics/pecl-imagick \
-	         devel/php74-intl \
-	         net/php74-ldap \
-	         devel/php74-pcntl \
-	         archivers/php74-bz2 \
-	         math/php74-bcmath \
-	         math/php74-gmp \
-	         sysutils/php74-fileinfo \
-	         textproc/php74-ctype \
-	         ftp/php74-curl \
-	         textproc/php74-dom \
-	         security/php74-filter \
-	         graphics/php74-gd \
-	         graphics/php74-exif \
-	         converters/php74-iconv \
-	         devel/php74-json \
-	         converters/php74-mbstring \
-	         databases/php74-mysqli \
-	         www/php74-opcache \
-	         security/php74-openssl \
-	         databases/php74-pdo \
-	         databases/php74-pdo_mysql \
-	         databases/php74-pdo_pgsql \
-	         databases/php74-pdo_sqlite \
-	         databases/php74-pgsql \
-	         archivers/php74-phar \
-	         sysutils/php74-posix \
-	         www/php74-session \
-	         textproc/php74-simplexml \
-	         databases/php74-sqlite3 \
-	         devel/php74-tokenizer \
-	         textproc/php74-xml \
-	         textproc/php74-xmlreader \
-	         textproc/php74-xmlwriter \
-	         textproc/php74-xsl \
-	         archivers/php74-zip \
-	         archivers/php74-zlib"
+	         devel/php${PHP_VER}-intl \
+	         net/php${PHP_VER}-ldap \
+	         devel/php${PHP_VER}-pcntl \
+	         archivers/php${PHP_VER}-bz2 \
+	         math/php${PHP_VER}-bcmath \
+	         math/php${PHP_VER}-gmp \
+	         sysutils/php${PHP_VER}-fileinfo \
+	         textproc/php${PHP_VER}-ctype \
+	         ftp/php${PHP_VER}-curl \
+	         textproc/php${PHP_VER}-dom \
+	         security/php${PHP_VER}-filter \
+	         graphics/php${PHP_VER}-gd \
+	         graphics/php${PHP_VER}-exif \
+	         converters/php${PHP_VER}-iconv \
+	         converters/php${PHP_VER}-mbstring \
+	         databases/php${PHP_VER}-mysqli \
+	         www/php${PHP_VER}-opcache \
+	         security/php${PHP_VER}-openssl \
+	         databases/php${PHP_VER}-pdo \
+	         databases/php${PHP_VER}-pdo_mysql \
+	         databases/php${PHP_VER}-pdo_pgsql \
+	         databases/php${PHP_VER}-pdo_sqlite \
+	         databases/php${PHP_VER}-pgsql \
+	         archivers/php${PHP_VER}-phar \
+	         sysutils/php${PHP_VER}-posix \
+	         www/php${PHP_VER}-session \
+	         textproc/php${PHP_VER}-simplexml \
+	         databases/php${PHP_VER}-sqlite3 \
+	         devel/php${PHP_VER}-tokenizer \
+	         textproc/php${PHP_VER}-xml \
+	         textproc/php${PHP_VER}-xmlreader \
+	         textproc/php${PHP_VER}-xmlwriter \
+	         textproc/php${PHP_VER}-xsl \
+	         archivers/php${PHP_VER}-zip \
+	         archivers/php${PHP_VER}-zlib"
 	         
 }
 
@@ -84,9 +94,6 @@ postcreate_nextcloud()
 		postgresql_enable="YES" \
 		php_fpm_enable="YES"
 
-	# use CBSD internal function to generate random password, length=30
-	DB_PASSWORD=$( random_password_gen -l 30 )
-
 	# cbsd jexec
 	jexec <<EOF
 echo "127.0.0.1:5432:${DB_DATABASE}:${DB_USERNAME}:${DB_PASSWORD}" > /root/.pgpass
@@ -94,7 +101,7 @@ echo "::1:5432:${DB_DATABASE}:${DB_USERNAME}:${DB_PASSWORD}" >> /root/.pgpass
 chmod 0600 /root/.pgpass
 EOF
 	echo
-	${ECHO} "${H3_COLOR}Postgres git user password saved in: ${N2_COLOR}${data}/root/.pgpass${N0_COLOR}"
+	${ECHO} "${H3_COLOR}Postgres user password saved in: ${N2_COLOR}${data}/root/.pgpass${N0_COLOR}"
 	echo
 	set -o xtrace
 
@@ -119,14 +126,11 @@ EOF
 	set -o xtrace
 
 	jexec <<EOF
-# create user git
+# create user
 psql -d template1 -U postgres -c "CREATE USER ${DB_USERNAME} CREATEDB SUPERUSER;"
 
-# Create the GitLab production database & grant all privileges on database
+# Create the Nextcloud database & grant all privileges on database
 psql -d template1 -U postgres -c "CREATE DATABASE ${DB_DATABASE} OWNER ${DB_USERNAME};"
-
-## Try connecting to the new database with the new user
-psql -U ${DB_USERNAME} -d ${DB_DATABASE}
 
 EOF
 
@@ -137,64 +141,45 @@ EOF
 	set +o errexit
 	set -o xtrace
 
+	${ECHO} "${H3_COLOR}Installing nextcloud...${N0_COLOR}"
 	# execute cmd inside jail
 	jexec <<EOF
 
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:/root/bin
 set -o errexit
 
-	cat >> /etc/make.conf << __EOF
-DEFAULT_VERSIONS+= php=7.4
-DEFAULT_VERSIONS+= pgsql=13
-OPTIONS_UNSET+=    MYSQL
-OPTIONS_SET+=      PGSQL
-OPTIONS_SET+=EXIF
-OPTIONS_SET+=IMAGICK
-OPTIONS_SET+=INTL
-OPTIONS_SET+=PCNTL
-__EOF
-
-	echo "Installing nextcloud..."
-        make -C /usr/ports/www/nextcloud BATCH=yes install clean
+        make -C /usr/ports/www/nextcloud BATCH=yes PGSQL=yes EXIF=yes IMAGICK=yes INTL=yes PCNTL=yes install clean
 	mkdir -p /usr/local/etc/nginx/ssl
-	mkdir -p /var/db/nextcloud/data
-	chown -R www:www /var/db/nextcloud
-	#chown -R www:www /usr/local/www/nextcloud
-	echo "create sessions tmp dir outside nextcloud installation"
-	mkdir -p /tmp/nextcloud-sessions-tmp
-	chmod o-rwx /tmp/nextcloud-sessions-tmp
-	chown -R www:www /tmp/nextcloud-sessions-tmp
+	mkdir -p ${NCDATAFOLDER}
+	chown -R www:www ${NCDATAFOLDER}
+#	echo "${H3_COLOR}Create sessions tmp dir outside nextcloud installation${N0_COLOR}"
+#	mkdir -p /tmp/nextcloud-sessions-tmp
+#	chmod o-rwx /tmp/nextcloud-sessions-tmp
+#	chown -R www:www /tmp/nextcloud-sessions-tmp
 EOF
 
 	jscp files/gen-cer ${jname}:/usr/local/etc/nginx/ssl/
 	jscp files/php-fpm.conf ${jname}:/usr/local/etc/
 	jscp files/php-fpm.d/www.conf ${jname}:/usr/local/etc/php-fpm.d/
+	jscp files/php.ini ${jname}:/usr/local/etc/
+	jscp files/memcached.json ${jname}:/tmp/
 	
+	${ECHO} "${H3_COLOR}Nextcloud initialization...${N0_COLOR}"
 	jexec <<EOF
-	cp /usr/local/etc/php.ini-production /usr/local/etc/php.ini
-	echo "Modify opcache settings in php.ini according to Nextcloud documentation (remove comment and set recommended value)"
-	echo "https://docs.nextcloud.com/server/15/admin_manual/configuration_server/server_tuning.html#enable-php-opcache"
-	sed -i '' 's/.*opcache.enable=.*/opcache.enable=1/' /usr/local/etc/php.ini
-	sed -i '' 's/.*opcache.enable_cli=.*/opcache.enable_cli=1/' /usr/local/etc/php.ini
-	sed -i '' 's/.*opcache.interned_strings_buffer=.*/opcache.interned_strings_buffer=8/' /usr/local/etc/php.ini
-	sed -i '' 's/.*opcache.max_accelerated_files=.*/opcache.max_accelerated_files=10000/' /usr/local/etc/php.ini
-	sed -i '' 's/.*opcache.memory_consumption=.*/opcache.memory_consumption=128/' /usr/local/etc/php.ini
-	sed -i '' 's/.*opcache.save_comments=.*/opcache.save_comments=1/' /usr/local/etc/php.ini
-	sed -i '' 's/.*opcache.revalidate_freq=.*/opcache.revalidate_freq=1/' /usr/local/etc/php.ini
-
-	# recommended value of 512MB for php memory limit (avoid warning when running occ)
-	sed -i '' 's/.*memory_limit.*/memory_limit=512M/' /usr/local/etc/php.ini
-	echo "apc.enable_cli=1" >> /usr/local/etc/php.ini
-	sed -i '' -e 's/cloud.example.com/${DOMAIN}/g' /usr/local/etc/nginx/nginx.conf
-	php /usr/local/www/nextcloud/occ maintenance:install --database 'pgsql' --database-name '${DB_DATABASE}' --database-user '${DB_USERNAME}' --database-pass '${DB_PASSWORD}' --admin-user '${NCUSER}' --admin-pass '${NCPASS}' --data-dir='/var/db/nextcloud/data'
+	php /usr/local/www/nextcloud/occ maintenance:install --database 'pgsql' --database-name '${DB_DATABASE}' --database-user '${DB_USERNAME}' --database-pass '${DB_PASSWORD}' --admin-user '${NCUSER}' --admin-pass '${NCPASS}' --data-dir='${NCDATAFOLDER}'
 	php /usr/local/www/nextcloud/occ config:system:set trusted_domains 1 --value=${DOMAIN}
+	php /usr/local/www/nextcloud/occ config:import /tmp/memcached.json
 	chown www:www /usr/local/www/nextcloud/config/config.php
+EOF
+	${ECHO} "${H3_COLOR}Nginx ssl initialization...${N0_COLOR}"
+	jexec <<EOF
 	cd /usr/local/etc/nginx/ssl
 	chmod +x gen-cer
 	./gen-cer ${DOMAIN}
+	sed -i '' -e 's/cloud.example.com/${DOMAIN}/g' /usr/local/etc/nginx/nginx.conf
 EOF
 
-	expose mode=add in=8081 out=443
+	expose mode=add in=${WWW_EXPOSE_PORT} out=443
 	service mode=action php-fpm start || true
 	service mode=action memcached start || true
 	service mode=action nginx start || true
