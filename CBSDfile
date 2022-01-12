@@ -9,13 +9,23 @@ DB_USERNAME=nextcloud
 # use CBSD internal function to generate random password, length=30
 DB_PASSWORD=$( random_password_gen -l 30 )
 
-DOMAIN=mycloud.example.com
+# env DOMAIN="nextcloud.mydomain.com" cbsd up
+[ -z "${DOMAIN}" ] && DOMAIN="nextcloud.example.com"
 
 NCUSER="admin"
 NCPASS="password"
 NCDATAFOLDER="/var/db/nextcloud/data"
 
-WWW_EXPOSE_PORT=8080
+SSLCOUNTRY=""
+SSLSTATE=""
+SSLLOCATION=""
+SSLPASSWD="dummypassword"
+
+# env SSLMAIL="your_mail@mydomain.com DOMAIN="nextcloud.mydomain.com" cbsd up
+[ -z "${SSLMAIL}" ] && SSLMAIL="root@localhost"
+
+# env SSLMAIL="your_mail@mydomain.com DOMAIN="nextcloud.mydomain.com" WWW_EXPOSE_PORT="8081" cbsd up
+[ -z "${WWW_EXPOSE_PORT}" ] && WWW_EXPOSE_PORT="8080"
 
 quiet=0
 
@@ -37,7 +47,8 @@ jail_nextcloud()
 	         lang/php${PHP_VER} \
 	         php${PHP_VER}-pecl-APCu \
 	         php${PHP_VER}-pecl-memcached \
-	         graphics/pecl-imagick \
+	         php${PHP_VER}-pecl-imagick \
+	         php${PHP_VER}-pecl-smbclient \
 	         devel/php${PHP_VER}-intl \
 	         net/php${PHP_VER}-ldap \
 	         devel/php${PHP_VER}-pcntl \
@@ -79,6 +90,7 @@ jail_nextcloud()
 postcreate_nextcloud()
 {
 	local _ip
+	_ip=$( jget mode=quiet ip4_addr )
 
 	set +o xtrace
 	set +o errexit
@@ -94,14 +106,13 @@ postcreate_nextcloud()
 		postgresql_enable="YES" \
 		php_fpm_enable="YES"
 
-	# cbsd jexec
 	jexec <<EOF
 echo "127.0.0.1:5432:${DB_DATABASE}:${DB_USERNAME}:${DB_PASSWORD}" > /root/.pgpass
 echo "::1:5432:${DB_DATABASE}:${DB_USERNAME}:${DB_PASSWORD}" >> /root/.pgpass
 chmod 0600 /root/.pgpass
 EOF
 	echo
-	${ECHO} "${H3_COLOR}Postgres user password saved in: ${N2_COLOR}${data}/root/.pgpass${N0_COLOR}"
+	${ECHO} "${H3_COLOR}Postgres user password saved in: ${N2_COLOR}/root/.pgpass${N0_COLOR}"
 	echo
 	set -o xtrace
 
@@ -128,10 +139,8 @@ EOF
 	jexec <<EOF
 # create user
 psql -d template1 -U postgres -c "CREATE USER ${DB_USERNAME} CREATEDB SUPERUSER;"
-
 # Create the Nextcloud database & grant all privileges on database
 psql -d template1 -U postgres -c "CREATE DATABASE ${DB_DATABASE} OWNER ${DB_USERNAME};"
-
 EOF
 
 	# tests
@@ -142,46 +151,51 @@ EOF
 	set -o xtrace
 
 	${ECHO} "${H3_COLOR}Installing nextcloud...${N0_COLOR}"
-	# execute cmd inside jail
 	jexec <<EOF
 
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:/root/bin
 set -o errexit
 
-        make -C /usr/ports/www/nextcloud BATCH=yes PGSQL=yes EXIF=yes IMAGICK=yes INTL=yes PCNTL=yes install clean
-	mkdir -p /usr/local/etc/nginx/ssl
+	fetch https://download.nextcloud.com/server/releases/latest.tar.bz2 -o /tmp/latest.tar.bz2
+	fetch https://download.nextcloud.com/server/releases/latest.tar.bz2.sha512 -o /tmp/latest.tar.bz2.sha512
+	cd /tmp && shasum -a 512 -c /tmp/latest.tar.bz2.sha512
+	tar -xf /tmp/latest.tar.bz2 -C /usr/local/www
+	chown -R www:www /usr/local/www/nextcloud
 	mkdir -p ${NCDATAFOLDER}
 	chown -R www:www ${NCDATAFOLDER}
-#	echo "${H3_COLOR}Create sessions tmp dir outside nextcloud installation${N0_COLOR}"
-#	mkdir -p /tmp/nextcloud-sessions-tmp
-#	chmod o-rwx /tmp/nextcloud-sessions-tmp
-#	chown -R www:www /tmp/nextcloud-sessions-tmp
+	sudo -u www php /usr/local/www/nextcloud/occ maintenance:install --database 'pgsql' --database-name '${DB_DATABASE}' --database-user '${DB_USERNAME}' --database-pass '${DB_PASSWORD}' --admin-user '${NCUSER}' --admin-pass '${NCPASS}' --data-dir='${NCDATAFOLDER}'
+	sudo -u www php /usr/local/www/nextcloud/occ config:system:set trusted_domains 1 --value=${DOMAIN}
+	sudo -u www php /usr/local/www/nextcloud/occ config:system:set trusted_domains 2 --value=${_ip}
+	sudo -u www php /usr/local/www/nextcloud/occ config:system:set memcache.local --value="\\\OC\\\Memcache\\\APCu"
+	sudo -u www php /usr/local/www/nextcloud/occ config:system:set memcache.distributed --value="\\\OC\\\Memcache\\\Memcached"
+	sudo -u www php /usr/local/www/nextcloud/occ config:import <<__EOF
+	{"system":{"memcached_servers":[["localhost",11211]]}}
+__EOF
+set +o errexit
 EOF
 
-	jscp files/gen-cer ${jname}:/usr/local/etc/nginx/ssl/
 	jscp files/php-fpm.conf ${jname}:/usr/local/etc/
 	jscp files/php-fpm.d/www.conf ${jname}:/usr/local/etc/php-fpm.d/
 	jscp files/php.ini ${jname}:/usr/local/etc/
-	jscp files/memcached.json ${jname}:/tmp/
 	
-	${ECHO} "${H3_COLOR}Nextcloud initialization...${N0_COLOR}"
-	jexec <<EOF
-	php /usr/local/www/nextcloud/occ maintenance:install --database 'pgsql' --database-name '${DB_DATABASE}' --database-user '${DB_USERNAME}' --database-pass '${DB_PASSWORD}' --admin-user '${NCUSER}' --admin-pass '${NCPASS}' --data-dir='${NCDATAFOLDER}'
-	php /usr/local/www/nextcloud/occ config:system:set trusted_domains 1 --value=${DOMAIN}
-	php /usr/local/www/nextcloud/occ config:import /tmp/memcached.json
-	chown www:www /usr/local/www/nextcloud/config/config.php
-EOF
 	${ECHO} "${H3_COLOR}Nginx ssl initialization...${N0_COLOR}"
 	jexec <<EOF
+	mkdir -p /usr/local/etc/nginx/ssl
 	cd /usr/local/etc/nginx/ssl
-	chmod +x gen-cer
-	./gen-cer ${DOMAIN}
-	sed -i '' -e 's/cloud.example.com/${DOMAIN}/g' /usr/local/etc/nginx/nginx.conf
+	echo "Generating key"
+	openssl genrsa -des3 -out server.key -passout pass:${SSLPASSWD} 2048
+	echo "Creating CSR"
+	openssl req -new -key server.key \
+		-passin pass:${SSLPASSWD} -out server.csr \
+		-subj "/C=${SSLCOUNTRY}/ST=${SSLSTATE}/L=${SSLLOCATION}/CN=${DOMAIN}/emailAddress=${SSLMAIL}"
+	echo "Removing passphrase from key"
+	#Remove passphrase from the key. Comment the line out to keep the passphrase
+	openssl rsa -in server.key -out server.key -passin pass:${SSLPASSWD}
+	echo "Creating CRT"
+	openssl x509 -req -days 7000 -in server.csr -signkey server.key -out server.crt
+	ln -sf /usr/local/etc/nginx/ssl/server.crt /usr/local/etc/nginx/ssl/ssl-bundle.crt
 EOF
 
-	expose mode=add in=${WWW_EXPOSE_PORT} out=443
-	service mode=action php-fpm start || true
-	service mode=action memcached start || true
 	service mode=action nginx start || true
 
 	# tests
@@ -190,4 +204,23 @@ EOF
 	tests/50_nginx_process.sh
 	set +o errexit
 	set -o xtrace
+
+	expose mode=add in=${WWW_EXPOSE_PORT} out=443
+	service mode=action php-fpm start || true
+	service mode=action memcached start || true
+
+	set +o xtrace
+	set -o errexit
+	tests/70_login.sh ${_ip}
+	set +o errexit
+	set -o xtrace
+
+	# postmessage
+	${ECHO} "	Nextcloud URL:	https://${DOMAIN}"
+
+	${CAT_CMD} <<EOF
+	Nextcloud admin login:		"${NCUSER}"
+	Nextcloud admin password:	"${NCPASS}"
+	PostgreSQL postgres password:	"${DB_PASSWORD}"
+EOF
 }
